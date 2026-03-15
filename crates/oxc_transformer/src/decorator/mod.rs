@@ -7,9 +7,7 @@ use oxc_span::SPAN;
 use oxc_traverse::Traverse;
 
 use crate::{
-    context::TraverseCtx,
-    state::TransformState,
-    utils::ast_builder::create_accessor_method,
+    context::TraverseCtx, state::TransformState, utils::ast_builder::create_accessor_method,
 };
 
 use legacy::LegacyDecorator;

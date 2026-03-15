@@ -291,10 +291,9 @@ pub fn create_accessor_method<'a>(
             ctx.ast.vec(),
             NONE,
         );
-        let stmt = ctx.ast.statement_return(
-            SPAN,
-            Some(create_this_private_field_expression(storage_name, ctx)),
-        );
+        let stmt = ctx
+            .ast
+            .statement_return(SPAN, Some(create_this_private_field_expression(storage_name, ctx)));
         (params, stmt)
     } else {
         // `this.#<storage_name> = value;`
