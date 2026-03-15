@@ -262,3 +262,90 @@ pub fn create_this_private_field_expression<'a>(
         false,
     ))
 }
+
+/// Create a getter or setter method that accesses a private backing field.
+///
+/// Getter: `get <key>() { return this.#<storage_name>; }`
+/// Setter: `set <key>(value) { this.#<storage_name> = value; }`
+pub fn create_accessor_method<'a>(
+    decorators: ArenaVec<'a, Decorator<'a>>,
+    key: PropertyKey<'a>,
+    kind: MethodDefinitionKind,
+    computed: bool,
+    is_static: bool,
+    storage_name: Atom<'a>,
+    class_scope_id: ScopeId,
+    ctx: &mut TraverseCtx<'a>,
+) -> ClassElement<'a> {
+    let is_getter = kind == MethodDefinitionKind::Get;
+    let scope_flags = ScopeFlags::Function
+        | ScopeFlags::StrictMode
+        | if is_getter { ScopeFlags::GetAccessor } else { ScopeFlags::SetAccessor };
+    let scope_id = ctx.create_child_scope(class_scope_id, scope_flags);
+
+    let (params, body_stmt) = if is_getter {
+        // `return this.#<storage_name>;`
+        let params = ctx.ast.alloc_formal_parameters(
+            SPAN,
+            FormalParameterKind::FormalParameter,
+            ctx.ast.vec(),
+            NONE,
+        );
+        let stmt = ctx.ast.statement_return(
+            SPAN,
+            Some(create_this_private_field_expression(storage_name, ctx)),
+        );
+        (params, stmt)
+    } else {
+        // `this.#<storage_name> = value;`
+        let value_binding = ctx.generate_binding(
+            Atom::from("value").into(),
+            scope_id,
+            SymbolFlags::FunctionScopedVariable,
+        );
+        let param = ctx.ast.formal_parameter(
+            SPAN,
+            ctx.ast.vec(),
+            value_binding.create_binding_pattern(ctx),
+            NONE,
+            NONE,
+            false,
+            None,
+            false,
+            false,
+        );
+        let params = ctx.ast.alloc_formal_parameters(
+            SPAN,
+            FormalParameterKind::FormalParameter,
+            ctx.ast.vec1(param),
+            NONE,
+        );
+        let assign = ctx.ast.expression_assignment(
+            SPAN,
+            AssignmentOperator::Assign,
+            AssignmentTarget::from(SimpleAssignmentTarget::from(
+                ctx.ast.member_expression_private_field_expression(
+                    SPAN,
+                    ctx.ast.expression_this(SPAN),
+                    ctx.ast.private_identifier(SPAN, storage_name),
+                    false,
+                ),
+            )),
+            value_binding.create_read_expression(ctx),
+        );
+        let stmt = ctx.ast.statement_expression(SPAN, assign);
+        (params, stmt)
+    };
+
+    create_class_method(
+        decorators,
+        key,
+        kind,
+        params,
+        ctx.ast.vec1(body_stmt),
+        computed,
+        is_static,
+        scope_id,
+        ctx,
+    )
+}
