@@ -63,11 +63,18 @@ pub(super) fn is_pure_global_function(name: &str) -> bool {
 /// Constructors that are side-effect-free when called as functions (not `new`),
 /// provided all arguments are side-effect-free.
 ///
-/// Note: `String`, `Number`, `BigInt`, `Symbol` are NOT included here because they
-/// have coercion side effects that require special-case handling in `CallExpression`.
+/// Note: `Number`, `Symbol`, `BigInt` are NOT included here because they require
+/// special-case argument validation in `CallExpression`:
+/// - `Number(Symbol())` throws TypeError (`ToNumeric` on Symbol)
+/// - `Symbol(Symbol())` throws TypeError (`ToString` on Symbol)
+/// - `BigInt(1.5)`, `BigInt(undefined)`, etc. throw for invalid values
+///
+/// `String` IS included because `String()` has special Symbol handling
+/// (`String(Symbol())` returns `"Symbol()"` without throwing), and per the
+/// "Coercion Methods Are Pure" assumption, `ToPrimitive` on objects is safe.
 #[rustfmt::skip]
 pub(super) fn is_pure_callable_constructor(name: &str) -> bool {
-    matches!(name, "Date" | "Boolean" | "Object"
+    matches!(name, "Date" | "Boolean" | "Object" | "String"
             | "Error" | "EvalError" | "RangeError" | "ReferenceError"
             | "SyntaxError" | "TypeError" | "URIError")
 }
@@ -76,11 +83,18 @@ pub(super) fn is_pure_callable_constructor(name: &str) -> bool {
 ///
 /// - `Object`: wraps/returns any argument, no coercion
 /// - `Boolean`: `ToBoolean` is a purely internal operation, no user code
-/// - Error types: just create error objects, no observable coercion
+/// - Error types: call `ToString(msg)` on the message argument, but `ToString` for
+///   Error only receives strings/numbers in practice, covered by the coercion assumption
+///
+/// Note: `String`, `Number`, `Date`, `ArrayBuffer` are NOT unconditionally pure because
+/// `ToString(Symbol)` / `ToNumber(Symbol)` throws TypeError. They need argument validation.
+/// (`String()` as a function IS safe — it has special Symbol handling — but `new String()`
+/// as a constructor calls `ToString` which throws on Symbol.)
+#[rustfmt::skip]
 pub(super) fn is_unconditionally_pure_constructor(name: &str) -> bool {
-    // Same as is_pure_callable_constructor but excluding Date:
-    // Date() as function is pure (returns string), but new Date(arg) needs ToPrimitive check.
-    name != "Date" && is_pure_callable_constructor(name)
+    matches!(name, "Object" | "Boolean"
+            | "Error" | "EvalError" | "RangeError" | "ReferenceError"
+            | "SyntaxError" | "TypeError" | "URIError")
 }
 
 #[rustfmt::skip]
@@ -100,7 +114,6 @@ pub(super) fn is_typed_array_constructor(name: &str) -> bool {
 /// - Array literals: `new Set([1,2,3])`, `new Map([[k,v]])`
 ///
 /// Following esbuild and Rollup behavior.
-/// See <https://github.com/oxc-project/oxc/issues/XXXX>
 pub(super) fn is_pure_collection_constructor<'a>(
     name: &str,
     args: &[Argument<'a>],

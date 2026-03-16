@@ -2,7 +2,7 @@ use oxc_ast::ast::*;
 
 use crate::{
     ToBigInt, ToIntegerIndex,
-    constant_evaluation::DetermineValueType,
+    constant_evaluation::{DetermineValueType, ValueType},
     to_numeric::ToNumeric,
     to_primitive::{ToPrimitive, ToPrimitiveResult},
 };
@@ -542,21 +542,23 @@ impl<'a> MayHaveSideEffects<'a> for CallExpression<'a> {
             && ctx.is_global_reference(ident)
         {
             let name = ident.name.as_str();
-            if name == "String" {
-                if self.arguments.iter().any(|e| e.may_have_side_effects(ctx)) {
-                    return true;
-                }
-                // String(value) calls ToPrimitive on object-like/unknown values.
-                return self.arguments.first().is_some_and(|arg| {
-                    arg.as_expression()
-                        .is_none_or(|expr| expr.to_primitive(ctx).is_string().is_none())
-                });
-            }
             if name == "Number" {
                 if self.arguments.iter().any(|e| e.may_have_side_effects(ctx)) {
                     return true;
                 }
-                // Number(value) throws on Symbol and can execute user code during ToPrimitive.
+                // Number(value): ToPrimitive on objects is assumed pure (coercion assumption),
+                // but ToNumeric(Symbol) throws TypeError.
+                return self.arguments.first().is_some_and(|arg| {
+                    arg.as_expression()
+                        .is_none_or(|expr| expr.to_primitive(ctx).is_symbol() != Some(false))
+                });
+            }
+            if name == "Symbol" {
+                if self.arguments.iter().any(|e| e.may_have_side_effects(ctx)) {
+                    return true;
+                }
+                // Symbol(description): ToString on non-undefined args. ToPrimitive on objects
+                // is assumed pure, but ToString(Symbol) throws TypeError.
                 return self.arguments.first().is_some_and(|arg| {
                     arg.as_expression()
                         .is_none_or(|expr| expr.to_primitive(ctx).is_symbol() != Some(false))
@@ -580,17 +582,6 @@ impl<'a> MayHaveSideEffects<'a> for CallExpression<'a> {
                     return true;
                 }
                 return expr.to_big_int(ctx).is_none();
-            }
-            if name == "Symbol" {
-                if self.arguments.iter().any(|e| e.may_have_side_effects(ctx)) {
-                    return true;
-                }
-                // Symbol(description) applies ToString to non-undefined arguments.
-                // ToString can throw on Symbol and execute user code during ToPrimitive.
-                return self.arguments.first().is_some_and(|arg| {
-                    arg.as_expression()
-                        .is_none_or(|expr| expr.to_primitive(ctx).is_symbol() != Some(false))
-                });
             }
             if is_pure_global_function(name)
                 || is_pure_callable_constructor(name)
@@ -628,24 +619,16 @@ impl<'a> MayHaveSideEffects<'a> for CallExpression<'a> {
     }
 }
 
-/// Pure if 0 args or first arg's `ToPrimitive` yields a known string.
-/// Used for `new String(arg)` where `ToString` calls `ToPrimitive(input, string)`.
-fn new_expr_with_to_string_check<'a>(
-    expr: &NewExpression<'a>,
-    ctx: &impl MayHaveSideEffectsContext<'a>,
-) -> bool {
-    if expr.arguments.iter().any(|e| e.may_have_side_effects(ctx)) {
-        return true;
-    }
-    expr.arguments.first().is_some_and(|arg| {
-        arg.as_expression().is_none_or(|e| e.to_primitive(ctx).is_string().is_none())
-    })
-}
-
-/// Pure if 0 args or first arg's `ToPrimitive` is known non-Symbol.
-/// Used for `new Number(arg)` (`ToNumeric` throws on Symbol) and
-/// `new ArrayBuffer(arg)` (`ToIndex` -> `ToNumber`, same constraint).
-fn new_expr_with_to_number_check<'a>(
+/// Check that the first argument's `ToPrimitive` result is known non-Symbol.
+///
+/// Per the "Coercion Methods Are Pure" assumption, calling `ToPrimitive` on objects
+/// (i.e. invoking `.toString()`/`.valueOf()`/`[Symbol.toPrimitive]()`) is side-effect-free.
+/// However, `ToNumber(Symbol)` still throws TypeError per spec, so we must verify the
+/// argument won't produce a Symbol value.
+///
+/// Used for `new String(arg)` (`ToString(Symbol)` throws),
+/// `new Number(arg)`, `new Date(arg)`, `new ArrayBuffer(arg)` (`ToNumber(Symbol)` throws).
+fn new_expr_may_have_side_effects_with_to_number<'a>(
     expr: &NewExpression<'a>,
     ctx: &impl MayHaveSideEffectsContext<'a>,
 ) -> bool {
@@ -654,22 +637,6 @@ fn new_expr_with_to_number_check<'a>(
     }
     expr.arguments.first().is_some_and(|arg| {
         arg.as_expression().is_none_or(|e| e.to_primitive(ctx).is_symbol() != Some(false))
-    })
-}
-
-/// Pure if 0 args or first arg's `ToPrimitive` is any determined primitive.
-/// Used for `new Date(arg)` (calls `ToPrimitive` on objects) and
-/// TypedArray constructors (call `@@iterator` or `.length` on objects).
-fn new_expr_with_to_primitive_check<'a>(
-    expr: &NewExpression<'a>,
-    ctx: &impl MayHaveSideEffectsContext<'a>,
-) -> bool {
-    if expr.arguments.iter().any(|e| e.may_have_side_effects(ctx)) {
-        return true;
-    }
-    expr.arguments.first().is_some_and(|arg| {
-        arg.as_expression()
-            .is_none_or(|e| matches!(e.to_primitive(ctx), ToPrimitiveResult::Undetermined))
     })
 }
 
@@ -685,16 +652,34 @@ impl<'a> MayHaveSideEffects<'a> for NewExpression<'a> {
             let name = ident.name.as_str();
 
             match name {
-                // new String(arg): ToString calls ToPrimitive on objects
-                "String" => return new_expr_with_to_string_check(self, ctx),
-                // new Number(arg): ToNumeric calls ToPrimitive; throws on Symbol
-                // new ArrayBuffer(arg): ToIndex -> ToNumber; same constraint
-                "Number" | "ArrayBuffer" => return new_expr_with_to_number_check(self, ctx),
-                // new Date(arg): 0 args safe; ToPrimitive on object args
-                "Date" => return new_expr_with_to_primitive_check(self, ctx),
+                // new String(arg): ToString calls ToPrimitive (assumed pure),
+                // but ToString(Symbol) throws TypeError.
+                // (Note: `String()` as a function IS safe — special Symbol handling —
+                // but `new String()` as a constructor calls ToString which throws.)
+                // new Number(arg) / new Date(arg) / new ArrayBuffer(arg):
+                // ToPrimitive assumed pure, but ToNumber(Symbol) throws TypeError.
+                "String" | "Number" | "Date" | "ArrayBuffer" => {
+                    return new_expr_may_have_side_effects_with_to_number(self, ctx);
+                }
                 _ if is_typed_array_constructor(name) => {
-                    // TypedArray constructors: 0 args safe; with object arg calls @@iterator/.length
-                    return new_expr_with_to_primitive_check(self, ctx);
+                    // TypedArray constructors: 0 args safe; with object arg calls @@iterator,
+                    // with BigInt arg ToNumber throws.
+                    // Only known safe primitive value types are accepted.
+                    if self.arguments.iter().any(|e| e.may_have_side_effects(ctx)) {
+                        return true;
+                    }
+                    return self.arguments.first().is_some_and(|arg| {
+                        arg.as_expression().is_none_or(|e| {
+                            !matches!(
+                                e.value_type(ctx),
+                                ValueType::Number
+                                    | ValueType::String
+                                    | ValueType::Boolean
+                                    | ValueType::Null
+                                    | ValueType::Undefined
+                            )
+                        })
+                    });
                 }
                 _ if is_unconditionally_pure_constructor(name)
                     || (name == "RegExp" && is_valid_regexp(&self.arguments))

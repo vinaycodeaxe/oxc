@@ -963,44 +963,46 @@ fn test_new_expressions() {
     // DataView requires an ArrayBuffer argument; calling without one throws
     test("new DataView", true);
 
-    // --- String: ToString calls ToPrimitive on objects ---
+    // --- String: ToPrimitive assumed pure, but ToString(Symbol) throws ---
+    // (Note: `String()` as function has special Symbol handling, but `new String()`
+    // as constructor calls ToString which throws on Symbol.)
     test("new String()", false);
     test("new String('hello')", false);
     test("new String(123)", false);
     test("new String(true)", false);
     test("new String(null)", false);
-    test("new String(x)", true); // unknown -> could be object
-    // Plain {} without toString/valueOf overrides -> ToPrimitive returns "[object Object]", safe
+    test("new String(x)", true); // unknown -> could be Symbol
+    // Plain {} ToPrimitive returns "[object Object]" (string, not Symbol) -> safe
     test("new String({})", false);
-    test("new String({toString() { return 'x' }})", true); // custom toString -> side effect
+    test("new String({toString() { return 'x' }})", true); // custom toString -> ToPrimitive undetermined
 
-    // --- Number: ToNumeric calls ToPrimitive; throws on Symbol ---
+    // --- Number: ToPrimitive assumed pure, but ToNumber(Symbol) throws ---
     test("new Number()", false);
     test("new Number(123)", false);
     test("new Number('42')", false);
     test("new Number(true)", false);
     test("new Number(null)", false);
-    test("new Number(x)", true); // unknown
-    // Plain {} without valueOf/toString overrides -> ToPrimitive returns "[object Object]" -> NaN, safe
+    test("new Number(x)", true); // unknown -> could be Symbol
+    // Plain {} ToPrimitive returns "[object Object]" (string, not Symbol) -> safe
     test("new Number({})", false);
-    test("new Number({valueOf() { return 1 }})", true); // custom valueOf -> side effect
+    test("new Number({valueOf() { return 1 }})", true); // custom valueOf -> ToPrimitive undetermined
 
-    // --- Date: ToPrimitive on object args ---
+    // --- Date: ToPrimitive assumed pure, but ToNumber(Symbol) throws ---
     test("new Date()", false);
     test("new Date(0)", false);
     test("new Date('2024')", false);
-    test("new Date(x)", true); // unknown
+    test("new Date(x)", true); // unknown -> could be Symbol
 
-    // --- ArrayBuffer: ToIndex -> ToNumber ---
+    // --- ArrayBuffer: ToIndex -> ToNumber, Symbol throws ---
     test("new ArrayBuffer()", false);
     test("new ArrayBuffer(16)", false);
-    test("new ArrayBuffer(x)", true); // unknown
+    test("new ArrayBuffer(x)", true); // unknown -> could be Symbol
 
     // --- TypedArray with args ---
+    // TypedArray: 0 args safe; with object arg calls @@iterator, BigInt arg throws in ToNumber
     test("new Uint8Array(16)", false); // numeric arg = length, safe
-    test("new Int8Array(x)", true); // unknown -> @@iterator
-    // Plain {} ToPrimitive returns "[object Object]" which is a known primitive, safe
-    test("new Float64Array({})", false);
+    test("new Int8Array(x)", true); // unknown value type
+    test("new Float64Array({})", true); // object -> @@iterator may throw
     test("new Float64Array({[Symbol.iterator]() {}})", true); // custom iterator -> side effect
 
     // --- Object: always safe (wraps/returns any arg) ---
@@ -1011,7 +1013,7 @@ fn test_new_expressions() {
     test("new Boolean(x)", false);
     test("new Boolean({})", false);
 
-    // --- Error types: always safe ---
+    // --- Error types: ToString covered by coercion assumption ---
     test("new Error(x)", false);
     test("new TypeError(x)", false);
 
@@ -1071,16 +1073,19 @@ fn test_call_expressions() {
     test("Object()", false);
     test("String()", false);
     test("Symbol()", false);
+    // String() — unconditionally pure (special Symbol handling + coercion assumption)
     test("String({})", false);
     test("String([1, 2, 3])", false);
-    test("String({ toString() { return 'x' } })", true);
-    test("String(obj)", true);
+    test("String({ toString() { return 'x' } })", false); // coercion assumed pure
+    test("String(obj)", false); // coercion assumed pure
+    // Number() — ToPrimitive assumed pure, but ToNumeric(Symbol) throws
     test("Number({})", false);
-    test("Number({ valueOf() { return 1 } })", true);
-    test("Number(Symbol())", true);
-    test("Number(obj)", true);
+    test("Number({ valueOf() { return 1 } })", true); // custom valueOf -> ToPrimitive undetermined
+    test("Number(Symbol())", true); // ToNumeric(Symbol) throws
+    test("Number(obj)", true); // unknown -> could be Symbol
     test("Boolean({})", false);
     test("Boolean(obj)", false);
+    // BigInt() — throws for invalid values
     test("BigInt()", true);
     test("BigInt(123)", false);
     test("BigInt(123n)", false);
@@ -1094,10 +1099,11 @@ fn test_call_expressions() {
     test("BigInt({})", true);
     test("BigInt({ valueOf() { return 1 } })", true);
     test("BigInt(obj)", true);
+    // Symbol() — ToPrimitive assumed pure, but ToString(Symbol) throws
     test("Symbol({})", false);
-    test("Symbol({ toString() { return 'x' } })", true);
-    test("Symbol(obj)", true);
-    test("Symbol(Symbol())", true);
+    test("Symbol({ toString() { return 'x' } })", true); // custom toString -> ToPrimitive undetermined
+    test("Symbol(obj)", true); // unknown -> could be Symbol
+    test("Symbol(Symbol())", true); // ToString(Symbol) throws
 
     test("decodeURI()", false);
     test("decodeURIComponent()", false);
